@@ -4,10 +4,8 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(express.json());
 
-// Basic CORS headers
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -18,7 +16,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health check endpoint
+const { fetchMeters } = require('./services/urjaClient');
+
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'ok',
@@ -26,7 +25,32 @@ app.get('/health', (req, res) => {
   });
 });
 
-// JSON 404 Fallback Handler
+app.get('/api/v1/meters', async (req, res, next) => {
+  try {
+    const { q, make, status, page, pageSize } = req.query;
+    const result = await fetchMeters({ q, make, status });
+
+    if (page !== undefined) {
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limit = Math.max(1, parseInt(pageSize, 10) || 20);
+      const start = (pageNum - 1) * limit;
+      const paginatedData = result.data.slice(start, start + limit);
+
+      return res.status(200).json({
+        total: result.total,
+        page: pageNum,
+        pageSize: limit,
+        totalPages: Math.ceil(result.total / limit),
+        data: paginatedData
+      });
+    }
+
+    res.status(200).json(result.data);
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.use((req, res) => {
   res.status(404).json({
     error: 'not_found',
@@ -34,7 +58,6 @@ app.use((req, res) => {
   });
 });
 
-// Centralized Error Handling Middleware
 app.use((err, req, res, next) => {
   console.error('[Unhandled Error]:', err);
   const status = err.status || 500;

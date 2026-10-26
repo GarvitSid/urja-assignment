@@ -64,4 +64,22 @@ During initial browser exploration, the following endpoints were observed:
 
 ---
 
+## 3.1 Meter Catalog & Search Parameter Quirks
+
+* **Fleet Size & Pagination:**
+  * `GET /portal/meters/search?q=&page=1` returns `{ total: 403, page: 1, pageSize: 20, data: [...] }`.
+  * Total fleet consists of 403 meters across 21 pages ($20 \times 20 + 3 = 403$).
+  * Dynamic pagination calculation: `totalPages = Math.ceil(total / pageSize)`.
+* **Search Parameter (`q`) Indexing:**
+  * Upstream `q` filters on `meterId` (e.g., `?q=J100001` yields 1 match) and `serialNo` (prefix/substring match).
+  * **Upstream does NOT index `make`:** Querying `?q=Genus` returns 0 results upstream despite hundreds of Genus meters existing. Make filtering must be performed client-side.
+* **Special Characters in Serials (`L&`):**
+  * 77 meters feature serial numbers prefixed with `L&` (manufactured by L&T, e.g. `L&84997`).
+  * If unencoded, the `&` character is interpreted by HTTP servers as a query string parameter separator (`?q=L&84997` breaks into parameter `q=L` and key `84997=`).
+  * All search queries must be strictly encoded via `encodeURIComponent(q)`.
+* **Parameter Coercion:**
+  * Query parameters must be coerced via `String(q)` to prevent crashes from repeated query keys (e.g. `?q=a&q=b` which Express parses into an Array `['a', 'b']`).
+
+---
+
 

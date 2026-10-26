@@ -3,17 +3,12 @@ const axios = require('axios');
 const { wrapper } = require('axios-cookiejar-support');
 const { CookieJar } = require('tough-cookie');
 
-/**
- * Factory function to create an authenticated Urja Portal client instance.
- * Supports custom baseURL and credentials for isolated unit testing.
- */
 function createUrjaClient(options = {}) {
   const baseURL = options.baseURL || process.env.UPSTREAM_BASE_URL || 'https://urja-ops.flockenergy.tech';
   const username = options.username || process.env.PORTAL_USERNAME || 'operator@urja.local';
   const password = options.password || process.env.PORTAL_PASSWORD || 'urja-ops-2026';
   const jar = options.jar || new CookieJar(null, { prefixSecurity: 'unsafe-disabled' });
 
-  // Create base Axios instance with tough-cookie jar support
   const client = wrapper(axios.create({
     baseURL,
     jar,
@@ -24,7 +19,6 @@ function createUrjaClient(options = {}) {
     }
   }));
 
-  // Separate client for authentication to prevent interceptor recursion
   const authClient = wrapper(axios.create({
     baseURL,
     jar,
@@ -37,10 +31,6 @@ function createUrjaClient(options = {}) {
 
   let loginPromise = null;
 
-  /**
-   * Performs SvelteKit action login with concurrency locking.
-   * Multiple concurrent callers await the same authentication promise.
-   */
   async function authenticate() {
     if (loginPromise) {
       return loginPromise;
@@ -67,12 +57,10 @@ function createUrjaClient(options = {}) {
     return loginPromise;
   }
 
-  // Response Interceptor: Self-healing session recovery
   client.interceptors.response.use(
     async (response) => {
-      // Check if upstream silently redirected an expired session to the login page (HTTP 200)
       const finalUrl = response.request?.res?.responseUrl || '';
-      const isLoginHtml = typeof response.data === 'string' && 
+      const isLoginHtml = typeof response.data === 'string' &&
         (response.data.includes('x-sveltekit-action') || response.data.includes('name="password"') || finalUrl.includes('/login'));
 
       if (isLoginHtml && !response.config._isRetry) {
@@ -86,12 +74,10 @@ function createUrjaClient(options = {}) {
     async (error) => {
       const originalRequest = error.config;
 
-      // Do NOT retry on 403 Forbidden (CSRF / permission issues, not expired session)
       if (error.response?.status === 403) {
         return Promise.reject(error);
       }
 
-      // Re-authenticate and retry at most once on 401 Unauthorized
       if (error.response?.status === 401 && originalRequest && !originalRequest._isRetry) {
         originalRequest._isRetry = true;
         try {
@@ -106,15 +92,59 @@ function createUrjaClient(options = {}) {
     }
   );
 
+  async function fetchMeters(query = {}) {
+    const rawQ = query.q !== undefined && query.q !== null ? query.q : '';
+    const q = Array.isArray(rawQ) ? String(rawQ[0]).trim() : String(rawQ).trim();
+    const encodedQ = encodeURIComponent(q);
+
+    const firstPageResp = await client.get(`/portal/meters/search?q=${encodedQ}&page=1`);
+    const firstPageData = firstPageResp.data || {};
+    const total = firstPageData.total || 0;
+    const pageSize = firstPageData.pageSize || 20;
+    const totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 1;
+
+    let allMeters = [...(firstPageData.data || [])];
+
+    if (totalPages > 1) {
+      const pagePromises = [];
+      for (let page = 2; page <= totalPages; page++) {
+        pagePromises.push(client.get(`/portal/meters/search?q=${encodedQ}&page=${page}`));
+      }
+      const pageResponses = await Promise.all(pagePromises);
+      for (const resp of pageResponses) {
+        if (resp.data && Array.isArray(resp.data.data)) {
+          allMeters.push(...resp.data.data);
+        }
+      }
+    }
+
+    let filtered = allMeters;
+
+    if (query.make) {
+      const targetMake = String(query.make).toLowerCase().trim();
+      filtered = filtered.filter(m => m.make && m.make.toLowerCase() === targetMake);
+    }
+
+    if (query.status) {
+      const targetStatus = String(query.status).toLowerCase().trim();
+      filtered = filtered.filter(m => m.installStatus && m.installStatus.toLowerCase() === targetStatus);
+    }
+
+    return {
+      total: filtered.length,
+      data: filtered
+    };
+  }
+
   return {
     client,
     authenticate,
+    fetchMeters,
     jar,
     baseURL
   };
 }
 
-// Export default singleton instance for application use
 const defaultInstance = createUrjaClient();
 
 module.exports = {
