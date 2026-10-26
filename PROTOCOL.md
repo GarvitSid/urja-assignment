@@ -82,4 +82,32 @@ During initial browser exploration, the following endpoints were observed:
 
 ---
 
+## 3.2 Meter Detail Scraping & Parallel Geo Mechanics
+
+* **DOM Layout of Server-Rendered Nameplate:**
+  * The `/meters/:id` endpoint returns server-rendered HTML.
+  * Inside `<dl class="divide-y divide-slate-100">`, each `<dt>` and `<dd>` pair is wrapped within its own individual `<div>`:
+    ```html
+    <div class="flex justify-between py-1.5 text-sm">
+      <dt class="text-slate-500">Meter ID</dt>
+      <dd class="font-medium text-slate-800">J100000</dd>
+    </div>
+    ```
+  * Utilizing `$(dt).next('dd')` guarantees pairing regardless of surrounding div wrappers.
+* **Label Variation & Inconsistency:**
+  * Different meter batches feature inconsistent label spacing:
+    * Meter `J100000`: Spaced labels (`"Meter ID"`, `"Serial No"`, `"Phase Type"`, `"Installation Status"`, `"Installation Type"`).
+    * Meter `J100004`: Concatenated labels (`"MeterId"`, `"SerialNo"`, `"PhaseType"`, `"InstallationStatus"`, `"InstallationType"`).
+  * Robust normalization strips all internal whitespace and converts to lowercase: `rawKey.replace(/\s+/g, '').toLowerCase()`.
+* **Parallel Location Fetching:**
+  * Coordinates are not in the initial SSR HTML; they are fetched by client-side JS from `GET /portal/meters/:id/geo`.
+  * The wrapper fires both requests concurrently via `Promise.allSettled()`, cutting endpoint latency in half.
+  * If geo returns HTTP 404, the API returns `location: null` instead of failing the request.
+  * Non-404 geo failures (HTTP 500 / timeout) are logged defensively without bringing down the response.
+* **Input Validation & 404 Propagation:**
+  * The `:id` parameter is validated against `/^[A-Z0-9]+$/i`; non-alphanumeric inputs immediately return HTTP 400 Bad Request.
+  * If upstream returns 404 on the HTML page, the service maps it to HTTP 404 with uniform error envelope `{ "error": "not_found", "message": "Meter not found" }`.
+
+---
+
 

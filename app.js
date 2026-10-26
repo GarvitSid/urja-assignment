@@ -16,7 +16,18 @@ app.use((req, res, next) => {
   next();
 });
 
-const { fetchMeters } = require('./services/urjaClient');
+const { fetchMeters, getMeterDetail } = require('./services/urjaClient');
+
+function validateMeterId(req, res, next) {
+  const { id } = req.params;
+  if (!id || !/^[A-Z0-9]+$/i.test(id)) {
+    return res.status(400).json({
+      error: 'bad_request',
+      message: 'Invalid meter ID format. Expected alphanumeric string.'
+    });
+  }
+  next();
+}
 
 app.get('/health', (req, res) => {
   res.status(200).json({
@@ -46,6 +57,15 @@ app.get('/api/v1/meters', async (req, res, next) => {
     }
 
     res.status(200).json(result.data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/v1/meters/:id', validateMeterId, async (req, res, next) => {
+  try {
+    const meter = await getMeterDetail(req.params.id);
+    res.status(200).json(meter);
   } catch (err) {
     next(err);
   }

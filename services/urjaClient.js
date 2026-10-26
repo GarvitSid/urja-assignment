@@ -136,10 +136,105 @@ function createUrjaClient(options = {}) {
     };
   }
 
+  function parseNameplateHtml(html) {
+    const cheerio = require('cheerio');
+    const $ = cheerio.load(html || '');
+    const nameplate = {};
+
+    $('dl dt').each((_, el) => {
+      const rawKey = $(el).text().trim();
+      const val = $(el).next('dd').text().trim();
+      if (!rawKey) return;
+
+      const normalizedKey = rawKey.replace(/\s+/g, '').toLowerCase();
+
+      switch (normalizedKey) {
+        case 'meterid':
+          nameplate.meterId = val;
+          break;
+        case 'serialno':
+          nameplate.serialNo = val;
+          break;
+        case 'make':
+          nameplate.make = val;
+          break;
+        case 'phasetype':
+          nameplate.phaseType = val;
+          break;
+        case 'installationstatus':
+        case 'installstatus':
+          nameplate.installStatus = val;
+          break;
+        case 'installationtype':
+        case 'installtype':
+          nameplate.installType = val;
+          break;
+        default:
+          nameplate[rawKey] = val;
+          break;
+      }
+    });
+
+    return nameplate;
+  }
+
+  async function getMeterDetail(meterId) {
+    const [htmlResult, geoResult] = await Promise.allSettled([
+      client.get(`/meters/${meterId}`, {
+        headers: { Accept: 'text/html,application/xhtml+xml' }
+      }),
+      client.get(`/portal/meters/${meterId}/geo`)
+    ]);
+
+    if (htmlResult.status === 'rejected') {
+      const err = htmlResult.reason;
+      if (err.response?.status === 404) {
+        const notFoundErr = new Error(`Meter ${meterId} not found`);
+        notFoundErr.status = 404;
+        notFoundErr.code = 'not_found';
+        throw notFoundErr;
+      }
+      throw err;
+    }
+
+    const nameplate = parseNameplateHtml(htmlResult.value.data);
+
+    if (!nameplate.meterId && !nameplate.serialNo) {
+      const notFoundErr = new Error(`Meter ${meterId} not found`);
+      notFoundErr.status = 404;
+      notFoundErr.code = 'not_found';
+      throw notFoundErr;
+    }
+
+    let location = null;
+    if (geoResult.status === 'fulfilled') {
+      const geoData = geoResult.value.data?.data || geoResult.value.data || {};
+      if (geoData.latitude !== undefined && geoData.longitude !== undefined &&
+        geoData.latitude !== null && geoData.longitude !== null) {
+        location = {
+          latitude: Number(geoData.latitude),
+          longitude: Number(geoData.longitude)
+        };
+      }
+    } else {
+      const geoErr = geoResult.reason;
+      if (geoErr.response?.status !== 404) {
+        console.warn(`[Urja Client] Geo coordinate retrieval failure for ${meterId}:`, geoErr.message);
+      }
+    }
+
+    return {
+      ...nameplate,
+      location
+    };
+  }
+
   return {
     client,
     authenticate,
     fetchMeters,
+    getMeterDetail,
+    parseNameplateHtml,
     jar,
     baseURL
   };
