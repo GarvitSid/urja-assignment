@@ -6,8 +6,8 @@ const crypto = require('crypto');
 
 function createUrjaClient(options = {}) {
   const baseURL = options.baseURL || process.env.UPSTREAM_BASE_URL || 'https://urja-ops.flockenergy.tech';
-  const username = options.username || process.env.PORTAL_USERNAME || 'operator@urja.local';
-  const password = options.password || process.env.PORTAL_PASSWORD || 'urja-ops-2026';
+  const username = options.username || process.env.URJA_EMAIL || process.env.PORTAL_USERNAME || (options.baseURL ? 'mock_user' : '');
+  const password = options.password || process.env.URJA_PASSWORD || process.env.PORTAL_PASSWORD || (options.baseURL ? 'mock_pass' : '');
   const jar = options.jar || new CookieJar(null, { prefixSecurity: 'unsafe-disabled' });
   const CACHE_TTL_MS = options.cacheTtlMs || (5 * 60 * 1000);
 
@@ -66,6 +66,9 @@ function createUrjaClient(options = {}) {
 
   async function authenticate() {
     const activeBaseURL = (!options.baseURL && process.env.UPSTREAM_BASE_URL) || baseURL;
+    if (!username || !password) {
+      throw new Error('Missing portal credentials. Please set URJA_EMAIL and URJA_PASSWORD in your .env file.');
+    }
     if (loginPromise) {
       return loginPromise;
     }
