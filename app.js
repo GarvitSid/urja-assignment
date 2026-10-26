@@ -16,7 +16,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const { fetchMeters, getMeterDetail, getMeterEnergy } = require('./services/urjaClient');
+const { fetchMeters, getMeterDetail, getMeterEnergy, getNetworkHierarchy } = require('./services/urjaClient');
 
 function validateMeterId(req, res, next) {
   const { id } = req.params;
@@ -94,6 +94,20 @@ app.get('/api/v1/meters/:id/energy', validateMeterId, async (req, res, next) => 
 
 app.get('/api/v1/meters/:id/consumption', (req, res, next) => {
   req.url = req.url.replace('/consumption', '/energy');
+  app.handle(req, res, next);
+});
+
+app.get('/api/v1/network/hierarchy', async (req, res, next) => {
+  try {
+    const hierarchy = await getNetworkHierarchy();
+    res.status(200).json(hierarchy);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get(['/api/v1/hierarchy', '/hierarchy'], (req, res, next) => {
+  req.url = '/api/v1/network/hierarchy';
   app.handle(req, res, next);
 });
 

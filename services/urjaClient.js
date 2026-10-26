@@ -29,9 +29,24 @@ function createUrjaClient(options = {}) {
     }
   }));
 
+  client.interceptors.request.use((config) => {
+    if (!options.baseURL && process.env.UPSTREAM_BASE_URL) {
+      config.baseURL = process.env.UPSTREAM_BASE_URL;
+    }
+    return config;
+  });
+
+  authClient.interceptors.request.use((config) => {
+    if (!options.baseURL && process.env.UPSTREAM_BASE_URL) {
+      config.baseURL = process.env.UPSTREAM_BASE_URL;
+    }
+    return config;
+  });
+
   let loginPromise = null;
 
   async function authenticate() {
+    const activeBaseURL = (!options.baseURL && process.env.UPSTREAM_BASE_URL) || baseURL;
     if (loginPromise) {
       return loginPromise;
     }
@@ -43,8 +58,8 @@ function createUrjaClient(options = {}) {
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
             'x-sveltekit-action': 'true',
-            'Origin': baseURL,
-            'Referer': `${baseURL}/login`,
+            'Origin': activeBaseURL,
+            'Referer': `${activeBaseURL}/login`,
             'Accept': 'application/json'
           }
         });
@@ -279,15 +294,155 @@ function createUrjaClient(options = {}) {
     return normalizedReadings;
   }
 
+  async function fetchDTs() {
+    const firstPageResp = await client.get('/portal/dts?page=1');
+    const firstPageData = firstPageResp.data || {};
+    const total = firstPageData.total || 0;
+    const pageSize = firstPageData.pageSize || 20;
+    const totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 1;
+
+    let allDts = [...(firstPageData.data || [])];
+
+    if (totalPages > 1) {
+      const pagePromises = [];
+      for (let page = 2; page <= totalPages; page++) {
+        pagePromises.push(client.get(`/portal/dts?page=${page}`));
+      }
+      const pageResponses = await Promise.all(pagePromises);
+      for (const resp of pageResponses) {
+        if (resp.data && Array.isArray(resp.data.data)) {
+          allDts.push(...resp.data.data);
+        }
+      }
+    }
+
+    return {
+      total: allDts.length,
+      data: allDts
+    };
+  }
+
+  function buildHierarchy(dts = [], meters = []) {
+    const dtsList = Array.isArray(dts) ? dts : (dts.data || []);
+    const metersList = Array.isArray(meters) ? meters : (meters.data || []);
+
+    const dtMap = new Map();
+    for (const dt of dtsList) {
+      if (dt && dt.code) {
+        dtMap.set(dt.code, {
+          transformerCode: dt.code,
+          name: dt.name || dt.code,
+          capacityKva: dt.capacityKva !== undefined ? dt.capacityKva : null,
+          feederCode: dt.feederCode || 'UNASSIGNED',
+          meters: []
+        });
+      }
+    }
+
+    const orphanMeters = [];
+
+    for (const meter of metersList) {
+      const isAssigned = meter.dtCode && dtMap.has(meter.dtCode);
+      const meterLeaf = {
+        meterId: meter.meterId,
+        serialNo: meter.serialNo,
+        make: meter.make,
+        phaseType: meter.phaseType || meter.phase,
+        phase: meter.phaseType || meter.phase,
+        installStatus: meter.installStatus || meter.status,
+        status: meter.installStatus || meter.status,
+        dtCode: meter.dtCode || null,
+        orphanDtCode: isAssigned ? null : (meter.dtCode || null)
+      };
+
+      if (isAssigned) {
+        dtMap.get(meter.dtCode).meters.push(meterLeaf);
+      } else {
+        orphanMeters.push(meterLeaf);
+      }
+    }
+
+    const feedersMap = new Map();
+
+    for (const dt of dtsList) {
+      if (!dt || !dt.code) continue;
+      const feederCode = dt.feederCode || 'UNASSIGNED';
+      if (!feedersMap.has(feederCode)) {
+        feedersMap.set(feederCode, {
+          feederCode,
+          transformers: []
+        });
+      }
+
+      const dtEntry = dtMap.get(dt.code);
+      const feeder = feedersMap.get(feederCode);
+      if (!feeder.transformers.some(t => t.transformerCode === dtEntry.transformerCode)) {
+        feeder.transformers.push({
+          transformerCode: dtEntry.transformerCode,
+          name: dtEntry.name,
+          capacityKva: dtEntry.capacityKva,
+          meterCount: dtEntry.meters.length,
+          meters: dtEntry.meters
+        });
+      }
+    }
+
+    if (orphanMeters.length > 0) {
+      if (!feedersMap.has('UNASSIGNED')) {
+        feedersMap.set('UNASSIGNED', {
+          feederCode: 'UNASSIGNED',
+          transformers: []
+        });
+      }
+      const unassignedFeeder = feedersMap.get('UNASSIGNED');
+      let unassignedDt = unassignedFeeder.transformers.find(t => t.transformerCode === 'UNASSIGNED');
+      if (!unassignedDt) {
+        unassignedDt = {
+          transformerCode: 'UNASSIGNED',
+          name: 'Unassigned Transformers / Orphan Meters',
+          capacityKva: 0,
+          meterCount: orphanMeters.length,
+          meters: orphanMeters
+        };
+        unassignedFeeder.transformers.push(unassignedDt);
+      } else {
+        unassignedDt.meters.push(...orphanMeters);
+        unassignedDt.meterCount = unassignedDt.meters.length;
+      }
+    }
+
+    return Array.from(feedersMap.values());
+  }
+
+  async function getNetworkHierarchy() {
+    try {
+      const [dtsResult, metersResult] = await Promise.all([
+        fetchDTs(),
+        fetchMeters()
+      ]);
+      const dts = dtsResult.data || [];
+      const meters = metersResult.data || [];
+      return buildHierarchy(dts, meters);
+    } catch (err) {
+      const gatewayErr = new Error('Failed to assemble network hierarchy from legacy portal.');
+      gatewayErr.status = 502;
+      gatewayErr.code = 'bad_gateway';
+      throw gatewayErr;
+    }
+  }
+
   return {
     client,
     authenticate,
     fetchMeters,
+    fetchDTs,
     getMeterDetail,
     parseNameplateHtml,
     getMeterEnergy,
     normalizeNumber,
     parseToISO,
+    buildHierarchy,
+    getNetworkHierarchy,
     jar,
     baseURL
   };

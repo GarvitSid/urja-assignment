@@ -132,4 +132,24 @@ During initial browser exploration, the following endpoints were observed:
 
 ---
 
+## 3.4 Electrical Network Topology & Absence of `/portal/feeders`
+
+* **The Phantom Endpoint (`/portal/feeders`):**
+  * Direct HTTP requests to `/portal/feeders` return HTTP 404 Not Found.
+  * In the legacy SvelteKit architecture, Feeders are not an independent first-class entity endpoint.
+* **Topological Linkage:**
+  * Distribution Transformers (`GET /portal/dts?page=1`) provide `{ code, name, feederCode, capacityKva }`.
+  * Meters (`GET /portal/meters/search`) provide `{ meterId, serialNo, dtCode, ... }`.
+  * Meters have no direct `feederCode` attribute. The electrical distribution tree is reconstructed via a 3-tier topological join:
+    $$\text{Feeder } (\text{from DT } \texttt{feederCode}) \longrightarrow \text{Distribution Transformer } (\texttt{dtCode}) \longrightarrow \text{Meters}$$
+* **Dynamic DT Pagination:**
+  * `GET /portal/dts?page=1` returns `{ total: 40, page: 1, pageSize: 20, data: [...] }`.
+  * `totalPages = Math.ceil(total / pageSize)`. Dynamic multi-page traversal fetches all pages without hardcoding page numbers.
+* **Orphan Isolation & 100% Meter Retention:**
+  * In distribution grids, meters can be unassigned, decommissioned, or reference obsolete transformer codes.
+  * Dropping unlinked meters leads to revenue leakage and unmonitored endpoints.
+  * Any meter lacking a valid `dtCode` mapping is routed into an `UNASSIGNED` transformer bucket under an `UNASSIGNED` feeder branch, guaranteeing 100% meter retention ($N_{\text{in}} = N_{\text{out}}$).
+
+---
+
 

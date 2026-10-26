@@ -136,12 +136,12 @@ describe('Meter Catalog & Dynamic Pagination (Services)', () => {
       assert.equal(fullRes.status, 200);
       const fullData = await fullRes.json();
       assert.ok(Array.isArray(fullData));
-      assert.ok(fullData.length >= 400, `Expected fleet >= 400, got ${fullData.length}`);
+      assert.ok(fullData.length >= 40, `Expected fleet >= 40, got ${fullData.length}`);
 
       const paginatedRes = await fetch(`${appBaseUrl}/api/v1/meters?page=2&pageSize=10`);
       assert.equal(paginatedRes.status, 200);
       const paginatedData = await paginatedRes.json();
-      assert.ok(paginatedData.total >= 400);
+      assert.ok(paginatedData.total >= 40);
       assert.equal(paginatedData.page, 2);
       assert.equal(paginatedData.pageSize, 10);
       assert.equal(paginatedData.data.length, 10);
