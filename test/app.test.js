@@ -10,7 +10,7 @@ describe('Service Foundation - Health Check & 404 Routing', () => {
     return new Promise((resolve) => {
       server = app.listen(0, () => {
         const port = server.address().port;
-        baseUrl = `http://127.0.0.1:${port}`;
+        baseUrl = `http://localhost:${port}`;
         resolve();
       });
     });
