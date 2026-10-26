@@ -1,0 +1,28 @@
+{
+  "name": "urja-meter-ops-api",
+  "version": "1.0.0",
+  "description": "Production REST API wrapper for the Urja Meter Operations legacy portal",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node --watch app.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "flock-energy",
+    "urja",
+    "meter-ops",
+    "api-wrapper"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.2",
+    "axios-cookiejar-support": "^5.0.4",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "swagger-ui-express": "^5.0.1",
+    "tough-cookie": "^4.1.4"
+  }
+}
