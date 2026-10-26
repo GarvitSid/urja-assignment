@@ -110,4 +110,26 @@ During initial browser exploration, the following endpoints were observed:
 
 ---
 
+## 3.3 Energy Telemetry Normalization & Monotonic Dial Semantics
+
+* **Envelope Structure:**
+  * `GET /portal/meters/:id/energy` returns `{ data: [ ...readings ] }` containing an array of reading objects.
+* **Cumulative Dial Register Semantics:**
+  * Empirical sampling across meters confirms that `kwh` values increase strictly monotonically over time:
+    $$48438.74 \longrightarrow 48439.16 \longrightarrow 48439.58 \longrightarrow \dots \longrightarrow 48580.36$$
+  * This proves that `kwh` is a cumulative mechanical dial register index rather than interval delta consumption.
+* **The Empty String Coercion Trap:**
+  * In JavaScript, `Number('') === 0` and `!isNaN('') === true`. Blindly casting upstream values during sensor dropouts causes empty strings to become fake zero readings.
+  * `normalizeNumber(val)` uses `Number.isFinite()` and explicitly returns `null` for empty strings, null, undefined, NaN, and `Infinity`.
+* **Timestamp Formatting & Timezone:**
+  * Upstream timestamps are formatted as `"DD/MM/YYYY HH:mm"` (e.g. `"30/06/2026 23:00"`, verified day-first by values $> 12$).
+  * Normalizes to ISO-8601 strings with explicit Indian Standard Time offset (`+05:30`): `"2026-06-30T23:00:00+05:30"`.
+  * The original string is preserved under `rawTimestamp` for complete data traceability.
+* **Tail Limiting (`?limit=N`):**
+  * The readings array is chronologically sorted oldest to newest.
+  * Passing `?limit=N` extracts the tail (`readings.slice(-limit)`), returning the latest $N$ readings in chronologically ascending order.
+  * Limit values are validated; non-positive numbers, floats, or non-integer values return HTTP 400 Bad Request.
+
+---
+
 

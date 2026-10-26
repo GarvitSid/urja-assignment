@@ -229,12 +229,65 @@ function createUrjaClient(options = {}) {
     };
   }
 
+  function normalizeNumber(val) {
+    if (val === null || val === undefined || val === '') return null;
+    if (typeof val === 'string' && val.trim() === '') return null;
+    const num = Number(val);
+    return Number.isFinite(num) ? num : null;
+  }
+
+  function parseToISO(timestampStr) {
+    if (!timestampStr || typeof timestampStr !== 'string') return null;
+    const match = timestampStr.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (!match) return null;
+    const [, day, month, year, hours, minutes, seconds = '00'] = match;
+    const pad = (s) => String(s).padStart(2, '0');
+    return `${year}-${pad(month)}-${pad(day)}T${pad(hours)}:${pad(minutes)}:${pad(seconds)}+05:30`;
+  }
+
+  async function getMeterEnergy(meterId, limit) {
+    let response;
+    try {
+      response = await client.get(`/portal/meters/${meterId}/energy`);
+    } catch (err) {
+      if (err.response?.status === 404) {
+        const notFoundErr = new Error(`Meter ${meterId} not found`);
+        notFoundErr.status = 404;
+        notFoundErr.code = 'not_found';
+        throw notFoundErr;
+      }
+      throw err;
+    }
+
+    const rawReadings = Array.isArray(response.data) ? response.data : (response.data?.data || []);
+
+    const normalizedReadings = rawReadings.map((reading) => ({
+      timestamp: parseToISO(reading.timestamp),
+      rawTimestamp: reading.timestamp || null,
+      kwh: normalizeNumber(reading.kwh),
+      kvah: normalizeNumber(reading.kvah),
+      voltR: normalizeNumber(reading.voltR)
+    }));
+
+    if (limit !== undefined && limit !== null) {
+      const limitNum = parseInt(limit, 10);
+      if (Number.isInteger(limitNum) && limitNum > 0) {
+        return normalizedReadings.slice(-limitNum);
+      }
+    }
+
+    return normalizedReadings;
+  }
+
   return {
     client,
     authenticate,
     fetchMeters,
     getMeterDetail,
     parseNameplateHtml,
+    getMeterEnergy,
+    normalizeNumber,
+    parseToISO,
     jar,
     baseURL
   };

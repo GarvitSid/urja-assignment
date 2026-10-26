@@ -16,7 +16,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const { fetchMeters, getMeterDetail } = require('./services/urjaClient');
+const { fetchMeters, getMeterDetail, getMeterEnergy } = require('./services/urjaClient');
 
 function validateMeterId(req, res, next) {
   const { id } = req.params;
@@ -69,6 +69,32 @@ app.get('/api/v1/meters/:id', validateMeterId, async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+app.get('/api/v1/meters/:id/energy', validateMeterId, async (req, res, next) => {
+  try {
+    const { limit } = req.query;
+
+    if (limit !== undefined) {
+      const parsed = Number(limit);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        return res.status(400).json({
+          error: 'bad_request',
+          message: 'Invalid limit parameter. Expected a positive integer.'
+        });
+      }
+    }
+
+    const readings = await getMeterEnergy(req.params.id, limit);
+    res.status(200).json(readings);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/v1/meters/:id/consumption', (req, res, next) => {
+  req.url = req.url.replace('/consumption', '/energy');
+  app.handle(req, res, next);
 });
 
 app.use((req, res) => {
