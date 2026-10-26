@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs');
-const { createUrjaClient, buildHierarchy } = require('../services/urjaClient');
+const { createUrjaClient, buildHierarchy, clearCache } = require('../services/urjaClient');
 const app = require('../app');
 
 describe('Electrical Network Hierarchy & Topology (Unit & Integration)', () => {
@@ -241,6 +241,7 @@ describe('Electrical Network Hierarchy & Topology (Unit & Integration)', () => {
     });
 
     it('propagates upstream failures as 502 Bad Gateway with standard error envelope', async () => {
+      clearCache();
       simulatedUpstreamError = true;
       try {
         const res = await fetch(`${appServerUrl}/api/v1/network/hierarchy`);
@@ -251,6 +252,7 @@ describe('Electrical Network Hierarchy & Topology (Unit & Integration)', () => {
         assert.ok(data.message.includes('Failed to assemble network hierarchy'));
       } finally {
         simulatedUpstreamError = false;
+        clearCache();
       }
     });
   });

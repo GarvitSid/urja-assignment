@@ -38,8 +38,8 @@ app.get('/health', (req, res) => {
 
 app.get('/api/v1/meters', async (req, res, next) => {
   try {
-    const { q, make, status, page, pageSize } = req.query;
-    const result = await fetchMeters({ q, make, status });
+    const { q, make, status, page, pageSize, fresh } = req.query;
+    const result = await fetchMeters({ q, make, status }, { forceRefresh: fresh === 'true' });
 
     if (page !== undefined) {
       const pageNum = Math.max(1, parseInt(page, 10) || 1);

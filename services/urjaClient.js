@@ -2,12 +2,31 @@ require('dotenv').config();
 const axios = require('axios');
 const { wrapper } = require('axios-cookiejar-support');
 const { CookieJar } = require('tough-cookie');
+const crypto = require('crypto');
 
 function createUrjaClient(options = {}) {
   const baseURL = options.baseURL || process.env.UPSTREAM_BASE_URL || 'https://urja-ops.flockenergy.tech';
   const username = options.username || process.env.PORTAL_USERNAME || 'operator@urja.local';
   const password = options.password || process.env.PORTAL_PASSWORD || 'urja-ops-2026';
   const jar = options.jar || new CookieJar(null, { prefixSecurity: 'unsafe-disabled' });
+  const CACHE_TTL_MS = options.cacheTtlMs || (5 * 60 * 1000);
+
+  let metersCache = null;
+  let metersCacheExpiresAt = 0;
+  let metersInFlightPromise = null;
+
+  let dtsCache = null;
+  let dtsCacheExpiresAt = 0;
+  let dtsInFlightPromise = null;
+
+  function clearCache() {
+    metersCache = null;
+    metersCacheExpiresAt = 0;
+    metersInFlightPromise = null;
+    dtsCache = null;
+    dtsCacheExpiresAt = 0;
+    dtsInFlightPromise = null;
+  }
 
   const client = wrapper(axios.create({
     baseURL,
@@ -107,7 +126,54 @@ function createUrjaClient(options = {}) {
     }
   );
 
-  async function fetchMeters(query = {}) {
+  function computeHmacSignature(secret, methodOrCanonical, path, query, timestamp) {
+    let canonical;
+    if (path === undefined && query === undefined && timestamp === undefined && typeof methodOrCanonical === 'string' && methodOrCanonical.includes('\n')) {
+      canonical = methodOrCanonical;
+    } else {
+      const method = methodOrCanonical || 'GET';
+      const reqPath = path || '/portal/export';
+      const reqQuery = query || 'page=1';
+      const ts = String(timestamp !== undefined ? timestamp : Math.floor(Date.now() / 1000));
+      canonical = [method, reqPath, reqQuery, ts].join('\n');
+    }
+    return crypto.createHmac('sha256', secret).update(canonical).digest('hex');
+  }
+
+  async function fetchExportMeters() {
+    const keysRes = await client.get('/portal/keys');
+    const secret = keysRes.data?.data?.signingSecret || keysRes.data?.signingSecret;
+    if (!secret) {
+      throw new Error('No signing secret returned from /portal/keys');
+    }
+
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const signature = computeHmacSignature(secret, 'GET', '/portal/export', 'page=1', timestamp);
+
+    const exportRes = await client.get('/portal/export?page=1', {
+      headers: {
+        'x-timestamp': timestamp,
+        'x-signature': signature
+      }
+    });
+
+    const rawList = exportRes.data?.data || (Array.isArray(exportRes.data) ? exportRes.data : []);
+    const normalized = rawList.map(m => ({
+      meterId: m.meterId,
+      serialNo: m.serialNo,
+      make: m.make,
+      phaseType: m.phaseType,
+      installStatus: m.installStatus,
+      dtCode: m.dtCode
+    }));
+
+    return {
+      total: exportRes.data?.total || normalized.length,
+      data: normalized
+    };
+  }
+
+  async function fetchMetersPaginated(query = {}) {
     const rawQ = query.q !== undefined && query.q !== null ? query.q : '';
     const q = Array.isArray(rawQ) ? String(rawQ[0]).trim() : String(rawQ).trim();
     const encodedQ = encodeURIComponent(q);
@@ -133,7 +199,65 @@ function createUrjaClient(options = {}) {
       }
     }
 
-    let filtered = allMeters;
+    return {
+      total: allMeters.length,
+      data: allMeters
+    };
+  }
+
+  async function fetchMetersWithFallback(options = {}) {
+    if (!options.forceRefresh && metersCache && Date.now() < metersCacheExpiresAt) {
+      return metersCache;
+    }
+
+    if (metersInFlightPromise) {
+      return metersInFlightPromise;
+    }
+
+    metersInFlightPromise = (async () => {
+      try {
+        let result;
+        try {
+          result = await fetchExportMeters();
+        } catch (err) {
+          result = await fetchMetersPaginated();
+        }
+
+        metersCache = result;
+        metersCacheExpiresAt = Date.now() + CACHE_TTL_MS;
+        return result;
+      } finally {
+        metersInFlightPromise = null;
+      }
+    })();
+
+    return metersInFlightPromise;
+  }
+
+  async function fetchMeters(query = {}, options = {}) {
+    const rawQ = query.q !== undefined && query.q !== null ? query.q : '';
+    const q = Array.isArray(rawQ) ? String(rawQ[0]).trim() : String(rawQ).trim();
+
+    let baseResult;
+    if (!q) {
+      baseResult = await fetchMetersWithFallback(options);
+    } else {
+      if (metersCache && Date.now() < metersCacheExpiresAt && !options.forceRefresh) {
+        baseResult = metersCache;
+      } else {
+        baseResult = await fetchMetersPaginated({ q });
+      }
+    }
+
+    let filtered = baseResult.data || [];
+
+    if (q) {
+      const qLower = q.toLowerCase();
+      filtered = filtered.filter(m =>
+        (m.meterId && m.meterId.toLowerCase().includes(qLower)) ||
+        (m.serialNo && m.serialNo.toLowerCase().includes(qLower))
+      );
+    }
 
     if (query.make) {
       const targetMake = String(query.make).toLowerCase().trim();
@@ -294,32 +418,52 @@ function createUrjaClient(options = {}) {
     return normalizedReadings;
   }
 
-  async function fetchDTs() {
-    const firstPageResp = await client.get('/portal/dts?page=1');
-    const firstPageData = firstPageResp.data || {};
-    const total = firstPageData.total || 0;
-    const pageSize = firstPageData.pageSize || 20;
-    const totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 1;
-
-    let allDts = [...(firstPageData.data || [])];
-
-    if (totalPages > 1) {
-      const pagePromises = [];
-      for (let page = 2; page <= totalPages; page++) {
-        pagePromises.push(client.get(`/portal/dts?page=${page}`));
-      }
-      const pageResponses = await Promise.all(pagePromises);
-      for (const resp of pageResponses) {
-        if (resp.data && Array.isArray(resp.data.data)) {
-          allDts.push(...resp.data.data);
-        }
-      }
+  async function fetchDTs(options = {}) {
+    if (!options.forceRefresh && dtsCache && Date.now() < dtsCacheExpiresAt) {
+      return dtsCache;
     }
 
-    return {
-      total: allDts.length,
-      data: allDts
-    };
+    if (dtsInFlightPromise) {
+      return dtsInFlightPromise;
+    }
+
+    dtsInFlightPromise = (async () => {
+      try {
+        const firstPageResp = await client.get('/portal/dts?page=1');
+        const firstPageData = firstPageResp.data || {};
+        const total = firstPageData.total || 0;
+        const pageSize = firstPageData.pageSize || 20;
+        const totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 1;
+
+        let allDts = [...(firstPageData.data || [])];
+
+        if (totalPages > 1) {
+          const pagePromises = [];
+          for (let page = 2; page <= totalPages; page++) {
+            pagePromises.push(client.get(`/portal/dts?page=${page}`));
+          }
+          const pageResponses = await Promise.all(pagePromises);
+          for (const resp of pageResponses) {
+            if (resp.data && Array.isArray(resp.data.data)) {
+              allDts.push(...resp.data.data);
+            }
+          }
+        }
+
+        const result = {
+          total: allDts.length,
+          data: allDts
+        };
+
+        dtsCache = result;
+        dtsCacheExpiresAt = Date.now() + CACHE_TTL_MS;
+        return result;
+      } finally {
+        dtsInFlightPromise = null;
+      }
+    })();
+
+    return dtsInFlightPromise;
   }
 
   function buildHierarchy(dts = [], meters = []) {
@@ -434,8 +578,14 @@ function createUrjaClient(options = {}) {
   return {
     client,
     authenticate,
+    computeHmacSignature,
+    fetchExportMeters,
+    fetchMetersPaginated,
+    fetchMetersWithFallback,
     fetchMeters,
     fetchDTs,
+    clearCache,
+    CACHE_TTL_MS,
     getMeterDetail,
     parseNameplateHtml,
     getMeterEnergy,

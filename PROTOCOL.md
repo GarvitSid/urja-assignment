@@ -152,4 +152,36 @@ During initial browser exploration, the following endpoints were observed:
 
 ---
 
+## 3.5 Fast Bulk Export Endpoint (`/portal/export` & `/portal/keys`) & TTL Caching
+
+* **Discovery via Client Bundle Inspection:**
+  * Reverse-engineering the SvelteKit frontend bundle chunk `_app/immutable/nodes/4.*.js` (Transformers view) revealed an internal "Export all meters" routine using HMAC-SHA256 request signing.
+* **Cryptographic Signing Protocol:**
+  * **Signing Secret:** Fetched from `GET /portal/keys` (`{ data: { signingSecret: "..." } }`).
+  * **Canonical Request String:** Formatted as a newline-delimited string:
+    $$\texttt{canonical} = [\texttt{method}, \texttt{path}, \texttt{query}, \texttt{timestamp}].\text{join}('\backslash\text{n}')$$
+    Example:
+    ```text
+    GET
+    /portal/export
+    page=1
+    1719788400
+    ```
+  * **Signature Generation:** Computed via `HMAC-SHA256(signingSecret, canonical)` formatted as a 64-character lowercase hexadecimal digest.
+  * **Required Request Headers:**
+    * `x-timestamp`: Unix epoch in seconds (`Math.floor(Date.now() / 1000)`).
+    * `x-signature`: Computed hexadecimal HMAC signature.
+* **Performance Impact & Schema Normalization:**
+  * While `GET /portal/meters/search` requires 21 sequential/parallel HTTP roundtrips (~2.5s) to paginate through 403 meters, `GET /portal/export?page=1` yields the entire 403-meter fleet in a single roundtrip (~150ms), reducing network overhead by >90%.
+  * The export payload includes backend internal fields (7-tier geographic hierarchy and coordinates); the client normalizes each item to the standard 6-field fleet schema (`meterId`, `serialNo`, `make`, `phaseType`, `installStatus`, `dtCode`).
+* **In-Memory TTL Cache & Single-Flight Mutex:**
+  * Meter and transformer catalogs are cached in-memory with a 5-minute TTL (`CACHE_TTL_MS = 300000`).
+  * An in-flight promise mutex (`metersInFlightPromise`) deduplicates concurrent cache-miss requests, eliminating "thundering herd" spikes against the legacy portal.
+  * Consumers can force cache invalidation via the `?fresh=true` query parameter or `clearCache()` API.
+* **Graceful Degradation & Automatic Fallback:**
+  * If `/portal/keys` or `/portal/export` fails (e.g. key rotation, upstream 500 error, or signature rejection), `fetchMetersWithFallback()` automatically catches the error and degrades gracefully to paginated search (`/portal/meters/search`), ensuring high availability.
+
+---
+
+
 
