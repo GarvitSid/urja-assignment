@@ -1,8 +1,15 @@
 require('dotenv').config();
 const express = require('express');
+const swaggerUi = require('swagger-ui-express');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+const openapiSpec = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'openapi.json'), 'utf8')
+);
 
 app.use(express.json());
 
@@ -35,6 +42,12 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString()
   });
 });
+
+app.get('/', (req, res) => {
+  res.redirect('/docs');
+});
+
+app.use('/docs', swaggerUi.serve, swaggerUi.setup(openapiSpec));
 
 app.get('/api/v1/meters', async (req, res, next) => {
   try {
@@ -130,6 +143,7 @@ app.use((err, req, res, next) => {
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`[Urja Service] Server running on http://localhost:${PORT}`);
+    console.log(`[Urja Service] Interactive Docs available at http://localhost:${PORT}/docs`);
   });
 }
 

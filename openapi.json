@@ -1,0 +1,607 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Flock Energy - Urja Meter Ops API",
+    "description": "REST API proxy over the legacy Urja Meter Ops portal with automated session management, in-memory caching, and electrical network hierarchy reconstruction.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Current Environment (Local & Production)"
+    },
+    {
+      "url": "http://localhost:3000",
+      "description": "Local development server"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "description": "Returns service health and uptime status without contacting upstream portal.",
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "service": {
+                      "type": "string",
+                      "example": "flock-energy-api"
+                    },
+                    "uptime": {
+                      "type": "number",
+                      "example": 12.34
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time",
+                      "example": "2026-10-26T16:00:00.000Z"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/meters": {
+      "get": {
+        "summary": "List all meters",
+        "description": "Returns the complete catalog of meters. Cached in-memory with a 5-minute TTL.",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Filter by meterId or serial number substring",
+            "schema": {
+              "type": "string"
+            },
+            "example": "J100"
+          },
+          {
+            "name": "make",
+            "in": "query",
+            "required": false,
+            "description": "Filter by meter manufacturer make (e.g., HPL, L&T, Genus, Allied, Secure)",
+            "schema": {
+              "type": "string"
+            },
+            "example": "HPL"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Filter by installation status (Installed, Decommissioned, Faulty)",
+            "schema": {
+              "type": "string"
+            },
+            "example": "Installed"
+          },
+          {
+            "name": "fresh",
+            "in": "query",
+            "required": false,
+            "description": "Set to true to bypass cache and re-fetch from legacy portal",
+            "schema": {
+              "type": "boolean"
+            },
+            "example": false
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Page number for paginated meter results (1-indexed)",
+            "schema": {
+              "type": "integer"
+            },
+            "example": 1
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Number of meters per page",
+            "schema": {
+              "type": "integer"
+            },
+            "example": 20
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of meters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "example": 403
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MeterSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Legacy portal failed to respond",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/meters/{id}": {
+      "get": {
+        "summary": "Get meter details",
+        "description": "Returns nameplate details (scraped and normalized from SSR HTML) and coordinates (retrieved from the client-side geo endpoint) for a single meter.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Unique meter identifier",
+            "schema": {
+              "type": "string"
+            },
+            "example": "J100001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Meter details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeterDetails"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid meter ID format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Meter not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Failed to fetch details from legacy portal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/meters/{id}/energy": {
+      "get": {
+        "summary": "Get meter energy readings",
+        "description": "Returns the meter's cumulative energy reading history. Timestamps are normalized to ISO-8601 with Indian Standard Time (+05:30) offset. Readings are chronologically ascending.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Unique meter identifier",
+            "schema": {
+              "type": "string"
+            },
+            "example": "J100000"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum number of most recent readings to return",
+            "schema": {
+              "type": "integer"
+            },
+            "example": 10
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Energy readings list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EnergyReading"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid meter ID format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Meter not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Failed to fetch energy data from legacy portal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/meters/{id}/consumption": {
+      "get": {
+        "summary": "Get meter energy readings (alias)",
+        "description": "Alias for /api/v1/meters/{id}/energy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "example": "J100000"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer" },
+            "example": 10
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Energy readings list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/EnergyReading" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/network/hierarchy": {
+      "get": {
+        "summary": "Get network distribution hierarchy",
+        "description": "Reconstructs the 3-tier electrical distribution topology (Feeder -> Distribution Transformer -> Meters) by dynamically grouping transformers and assigned meters.",
+        "responses": {
+          "200": {
+            "description": "Network hierarchy grouped by feeder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FeederHierarchy"
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Failed to assemble network hierarchy from legacy portal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hierarchy": {
+      "get": {
+        "summary": "Get network distribution hierarchy (alias)",
+        "description": "Alias for /api/v1/network/hierarchy",
+        "responses": {
+          "200": {
+            "description": "Network hierarchy grouped by feeder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/FeederHierarchy" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/hierarchy": {
+      "get": {
+        "summary": "Get network distribution hierarchy (root alias)",
+        "description": "Alias for /api/v1/network/hierarchy",
+        "responses": {
+          "200": {
+            "description": "Network hierarchy grouped by feeder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/FeederHierarchy" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "MeterSummary": {
+        "type": "object",
+        "properties": {
+          "meterId": {
+            "type": "string",
+            "example": "J100000"
+          },
+          "serialNo": {
+            "type": "string",
+            "example": "SE33962"
+          },
+          "make": {
+            "type": "string",
+            "example": "HPL"
+          },
+          "phaseType": {
+            "type": "string",
+            "example": "single"
+          },
+          "installStatus": {
+            "type": "string",
+            "example": "Decommissioned"
+          },
+          "dtCode": {
+            "type": "string",
+            "example": "DT-001"
+          }
+        }
+      },
+      "MeterDetails": {
+        "type": "object",
+        "properties": {
+          "meterId": {
+            "type": "string",
+            "example": "J100001"
+          },
+          "serialNo": {
+            "type": "string",
+            "nullable": true,
+            "example": "GE84132"
+          },
+          "make": {
+            "type": "string",
+            "nullable": true,
+            "example": "L&T"
+          },
+          "phaseType": {
+            "type": "string",
+            "nullable": true,
+            "example": "single"
+          },
+          "installStatus": {
+            "type": "string",
+            "nullable": true,
+            "example": "Installed"
+          },
+          "installType": {
+            "type": "string",
+            "nullable": true,
+            "example": "CT Operated"
+          },
+          "location": {
+            "type": "object",
+            "properties": {
+              "latitude": {
+                "type": "number",
+                "nullable": true,
+                "example": 26.822137
+              },
+              "longitude": {
+                "type": "number",
+                "nullable": true,
+                "example": 75.907182
+              }
+            }
+          }
+        }
+      },
+      "EnergyReading": {
+        "type": "object",
+        "properties": {
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-06-23T23:30:00+05:30"
+          },
+          "rawTimestamp": {
+            "type": "string",
+            "nullable": true,
+            "example": "23/06/2026 23:30"
+          },
+          "kwh": {
+            "type": "number",
+            "nullable": true,
+            "description": "Cumulative active energy dial register in kWh",
+            "example": 48438.74
+          },
+          "kvah": {
+            "type": "number",
+            "nullable": true,
+            "description": "Cumulative apparent energy dial register in kVAh",
+            "example": 52313.84
+          },
+          "voltR": {
+            "type": "number",
+            "nullable": true,
+            "description": "R-phase voltage in Volts",
+            "example": 226
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "example": "not_found"
+          },
+          "message": {
+            "type": "string",
+            "example": "Meter not found"
+          }
+        }
+      },
+      "FeederHierarchy": {
+        "type": "object",
+        "properties": {
+          "feederCode": {
+            "type": "string",
+            "example": "F-001"
+          },
+          "transformers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "transformerCode": {
+                  "type": "string",
+                  "example": "DT-001"
+                },
+                "name": {
+                  "type": "string",
+                  "example": "Malviya Nagar DT 1"
+                },
+                "capacityKva": {
+                  "type": "integer",
+                  "example": 100
+                },
+                "meterCount": {
+                  "type": "integer",
+                  "example": 2
+                },
+                "meters": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "meterId": {
+                        "type": "string",
+                        "example": "J100000"
+                      },
+                      "serialNo": {
+                        "type": "string",
+                        "example": "SE33962"
+                      },
+                      "status": {
+                        "type": "string",
+                        "example": "Decommissioned"
+                      },
+                      "phase": {
+                        "type": "string",
+                        "example": "single"
+                      },
+                      "orphanDtCode": {
+                        "type": "string",
+                        "nullable": true,
+                        "example": null
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Location": {
+        "type": "object",
+        "properties": {
+          "latitude": {
+            "type": "number",
+            "nullable": true,
+            "example": 26.822137
+          },
+          "longitude": {
+            "type": "number",
+            "nullable": true,
+            "example": 75.907182
+          }
+        }
+      },
+      "MeterDetail": {
+        "$ref": "#/components/schemas/MeterDetails"
+      },
+      "HierarchyFeeder": {
+        "$ref": "#/components/schemas/FeederHierarchy"
+      }
+    }
+  }
+}
