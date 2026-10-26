@@ -39,6 +39,8 @@ function validateMeterId(req, res, next) {
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'ok',
+    service: 'urja-assignment',
+    uptime: process.uptime(),
     timestamp: new Date().toISOString()
   });
 });

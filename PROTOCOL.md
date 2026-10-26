@@ -1,187 +1,208 @@
-# Urja Legacy Portal: Protocol & Reconnaissance Notes
+# Urja Meter Ops Portal — Protocol & Reverse-Engineering Specification
 
-> **Status:** Initial Discovery (Milestone 02)  
-> *Note: This document records findings from live network inspection and will be expanded as each feature is implemented.*
-
----
-
-## 1. Upstream Service Overview
-
-* **Target URL:** `https://urja-ops.flockenergy.tech`
-* **Architecture:** SvelteKit web application combining Server-Side Rendered (SSR) HTML pages with internal JSON data routes (`/portal/*`).
-* **Authentication Method:** Stateful cookie-based session.
+This document details how the legacy **Urja Meter Ops** portal (`https://urja-ops.flockenergy.tech`) actually operates. It synthesizes findings gathered through browser DevTools network inspection, client-side SvelteKit bundle reverse-engineering, and programmatic verification against the live system.
 
 ---
 
-## 2. Authentication Flow & Session Quirks
+## 1. Authentication & Session Lifecycle
 
-### 2.1 Login Request
-Inspecting the login network activity in DevTools reveals that authentication is not a standard REST JSON endpoint, but a **SvelteKit Form Action**:
+### Login Flow
+- **Endpoint:** `POST https://urja-ops.flockenergy.tech/login`
+- **Content-Type:** `application/x-www-form-urlencoded`
+- **Body:** `email={email}&password={password}`
+- **Required Header:** `x-sveltekit-action: true`
+  - SvelteKit uses this header to distinguish form actions from normal browser page navigations. Without it, the backend treats the POST as a page navigation and returns an HTML redirect without processing authentication.
+- **CSRF & Origin Validation:**
+  - The portal rejects requests that do not carry `Origin` and `Referer` headers matching its own origin (`https://urja-ops.flockenergy.tech`). Direct HTTP POST requests omitting these headers fail with `403 Forbidden`.
+- **Session Cookie:**
+  - On successful authentication, the server sets a session cookie:
+    ```http
+    Set-Cookie: __Secure-better-auth.session_token=<token>; Path=/; HttpOnly; Secure; SameSite=Lax
+    ```
+  - This cookie must be retained in an HTTP cookie jar and attached to every subsequent request. There is no Bearer token or secondary API key mechanism for standard routes.
 
-* **Request:** `POST /login`
-* **Content-Type:** `application/x-www-form-urlencoded`
-* **Required Headers:**
-  * `x-sveltekit-action: true` (Mandatory: SvelteKit ignores or rejects the action without this)
-  * `Origin: https://urja-ops.flockenergy.tech`
-  * `Referer: https://urja-ops.flockenergy.tech/login`
-  * `Accept: application/json`
-* **Payload:**
-  ```text
-  email=operator@urja.local&password=urja-ops-2026
+### Session Expiry & Redirect Behavior
+- When an authenticated session expires, SvelteKit issues an HTTP redirect to `/login`.
+- For standard HTTP clients following redirects (such as Axios), this produces an `HTTP 200 OK` response containing the HTML login form (`<form action="/login">`) instead of the requested JSON or data payload.
+- The wrapper client monitors incoming responses for HTML login form markers and HTTP 401 statuses. When detected, it flags the session as expired, re-authenticates with the configured credentials, and replays the original request transparently.
+
+---
+
+## 2. Discovered Internal Endpoints & Specifications
+
+The portal is a SvelteKit single-page application. Most in-app navigations fire background `fetch` requests for JSON rather than performing full page reloads.
+
+### A. Meter Search & Catalog (Paginated)
+- **Endpoint:** `GET /portal/meters/search?q={query}&page={page_number}`
+- **Response Format:**
+  ```json
+  {
+    "total": 403,
+    "page": 1,
+    "pageSize": 20,
+    "data": [
+      {
+        "meterId": "J100000",
+        "serialNo": "SE33962",
+        "make": "HPL",
+        "phaseType": "single",
+        "installStatus": "Decommissioned",
+        "dtCode": "DT-001"
+      }
+    ]
+  }
   ```
-
-### 2.2 Session Cookie
-A successful login sets the following session cookie:
-* **Name:** `__Secure-better-auth.session_token`
-* **Attributes:** `Path=/`, `HttpOnly`, `Secure`, `SameSite=Lax`
-
-### 2.3 Observed Session Behavior
-* Probing endpoints without this cookie (or with an expired token) results in either an HTTP `401 Unauthorized` or an HTTP `200 OK` that silently redirects to `/login`.
-* An HTTP client must not treat an HTTP 200 containing login HTML as a valid data response; it must detect the redirection and trigger session re-authentication.
-
-### 2.4 Client Session Healing & Interceptor Design
-To handle session expiration transparently without caller disruption, the client implements an Axios response interceptor:
-1. **Redirect Detection:** Detects when an unauthenticated request receives HTTP 200 containing HTML login form tags or `response.request.res.responseUrl` pointing to `/login`.
-2. **Re-Authentication & Replay:** Automatically calls `authenticate()` to obtain a fresh session cookie, then replays the original request.
-3. **Single-Retry Boundary:** Stamps requests with `_isRetry = true` to strictly prevent infinite re-auth loops if credentials become invalid.
-4. **403 Forbidden Guard:** Never retries on HTTP 403 Forbidden (distinguishing CSRF/permission failures from expired sessions).
-5. **Concurrency Mutex:** Groups concurrent unauthenticated requests so only a single login request is made (`loginPromise`), preventing thundering herds against the auth endpoint.
+- **Characteristics & Quirks:**
+  - **Pagination:** Fixed `pageSize` of 20. The catalog contains **403 meters across 21 pages** (`Math.ceil(total / pageSize)`). Walking this list sequentially requires 21 downstream HTTP requests.
+  - **Search Parameter (`q`):** Performs substring/prefix matching against `meterId` and `serialNo`. It does not filter by `make` or `dtCode`.
+  - **Ampersands in Serials:** 77 meters have serial numbers containing `&` (e.g., `L&84997`, representing L&T manufacture). Direct queries like `?q=L&84997` without URL encoding split the query string into separate keys (`q=L` and `84997=`). Clients querying the upstream portal directly must URL-encode query values.
+  - **Grid Association:** Meters carry `dtCode` but do not contain a direct `feederCode` field. Grid association must be resolved through the Distribution Transformers.
 
 ---
 
-## 3. Discovered Endpoints (Initial Mapping)
-
-During initial browser exploration, the following endpoints were observed:
-
-| Method | Endpoint | Response Format | Purpose |
-|---|---|---|---|
-| `POST` | `/login` | SvelteKit Action | Establishes authenticated operator session |
-| `GET` | `/portal/meters/search?q=&page=1` | JSON (`{ total, page, pageSize, data }`) | Paginated search of the meter fleet |
-| `GET` | `/portal/dts?page=1` | JSON (`{ total, page, pageSize, data }`) | Paginated list of distribution transformers |
-| `GET` | `/meters/:id` | SSR HTML (`text/html`) | Server-rendered meter detail view |
-| `GET` | `/portal/meters/:id/geo` | JSON (`{ data: { latitude, longitude } }`) | Location coordinates loaded by the frontend |
-| `GET` | `/portal/meters/:id/energy` | JSON (`{ data: [...] }`) | Historical energy telemetry series |
-
----
-
-## 3.1 Meter Catalog & Search Parameter Quirks
-
-* **Fleet Size & Pagination:**
-  * `GET /portal/meters/search?q=&page=1` returns `{ total: 403, page: 1, pageSize: 20, data: [...] }`.
-  * Total fleet consists of 403 meters across 21 pages ($20 \times 20 + 3 = 403$).
-  * Dynamic pagination calculation: `totalPages = Math.ceil(total / pageSize)`.
-* **Search Parameter (`q`) Indexing:**
-  * Upstream `q` filters on `meterId` (e.g., `?q=J100001` yields 1 match) and `serialNo` (prefix/substring match).
-  * **Upstream does NOT index `make`:** Querying `?q=Genus` returns 0 results upstream despite hundreds of Genus meters existing. Make filtering must be performed client-side.
-* **Special Characters in Serials (`L&`):**
-  * 77 meters feature serial numbers prefixed with `L&` (manufactured by L&T, e.g. `L&84997`).
-  * If unencoded, the `&` character is interpreted by HTTP servers as a query string parameter separator (`?q=L&84997` breaks into parameter `q=L` and key `84997=`).
-  * All search queries must be strictly encoded via `encodeURIComponent(q)`.
-* **Parameter Coercion:**
-  * Query parameters must be coerced via `String(q)` to prevent crashes from repeated query keys (e.g. `?q=a&q=b` which Express parses into an Array `['a', 'b']`).
+### B. Distribution Transformers (DTs)
+- **Endpoint:** `GET /portal/dts?page={page_number}`
+- **Response Format:**
+  ```json
+  {
+    "total": 40,
+    "page": 1,
+    "pageSize": 20,
+    "data": [
+      {
+        "code": "DT-001",
+        "name": "Malviya Nagar DT 1",
+        "capacityKva": 100,
+        "feederCode": "F-001"
+      }
+    ]
+  }
+  ```
+- **Characteristics:**
+  - Contains **40 distribution transformers across 2 pages** (20 per page). Requesting `page=3` returns `data: []`.
+  - DT records bridge meters to substation feeders (`feederCode`).
+  - Search or filter query parameters are ignored by this endpoint.
 
 ---
 
-## 3.2 Meter Detail Scraping & Parallel Geo Mechanics
-
-* **DOM Layout of Server-Rendered Nameplate:**
-  * The `/meters/:id` endpoint returns server-rendered HTML.
-  * Inside `<dl class="divide-y divide-slate-100">`, each `<dt>` and `<dd>` pair is wrapped within its own individual `<div>`:
-    ```html
-    <div class="flex justify-between py-1.5 text-sm">
-      <dt class="text-slate-500">Meter ID</dt>
-      <dd class="font-medium text-slate-800">J100000</dd>
-    </div>
-    ```
-  * Utilizing `$(dt).next('dd')` guarantees pairing regardless of surrounding div wrappers.
-* **Label Variation & Inconsistency:**
-  * Different meter batches feature inconsistent label spacing:
-    * Meter `J100000`: Spaced labels (`"Meter ID"`, `"Serial No"`, `"Phase Type"`, `"Installation Status"`, `"Installation Type"`).
-    * Meter `J100004`: Concatenated labels (`"MeterId"`, `"SerialNo"`, `"PhaseType"`, `"InstallationStatus"`, `"InstallationType"`).
-  * Robust normalization strips all internal whitespace and converts to lowercase: `rawKey.replace(/\s+/g, '').toLowerCase()`.
-* **Parallel Location Fetching:**
-  * Coordinates are not in the initial SSR HTML; they are fetched by client-side JS from `GET /portal/meters/:id/geo`.
-  * The wrapper fires both requests concurrently via `Promise.allSettled()`, cutting endpoint latency in half.
-  * If geo returns HTTP 404, the API returns `location: null` instead of failing the request.
-  * Non-404 geo failures (HTTP 500 / timeout) are logged defensively without bringing down the response.
-* **Input Validation & 404 Propagation:**
-  * The `:id` parameter is validated against `/^[A-Z0-9]+$/i`; non-alphanumeric inputs immediately return HTTP 400 Bad Request.
-  * If upstream returns 404 on the HTML page, the service maps it to HTTP 404 with uniform error envelope `{ "error": "not_found", "message": "Meter not found" }`.
+### C. Meter Details (Nameplate HTML) vs. The `devalue` Quirk
+- **Endpoints:**
+  - Server-rendered HTML: `GET /meters/{meter_id}`
+  - Internal SvelteKit JSON: `GET /meters/{meter_id}/__data.json?x-sveltekit-invalidated=001`
+- **The `devalue` Serialization Quirk:**
+  - The portal's internal `__data.json` endpoint uses SvelteKit's `devalue` format. Instead of conventional key/value pairs, all values are flattened into an array, and objects store integer pointers into that array (e.g. `"Installation Status"` maps to an index integer, not the string value).
+  - *Engineering Decision:* Writing a deserializer for private `devalue` index pointers was rejected as fragile, since the indexing scheme is an internal framework detail that can change across minor SvelteKit releases.
+  - *Scraping Approach:* The wrapper requests server-rendered HTML at `GET /meters/{meter_id}` and parses the nameplate `<dt>`/`<dd>` pairs with Cheerio.
+- **Inconsistent Nameplate Markup:**
+  - Markup structure varies across records:
+    - Spaced labels: `J100001` renders `<dt>Serial No</dt>` and `<dt>Installation Status</dt>`.
+    - Concatenated labels: `J100004` renders `<dt>SerialNo</dt>` and `<dt>InstallationStatus</dt>`.
+    - Wrapper elements: Tags are wrapped in parent `<div>` elements inside `<dl>`.
+  - The parser normalizes keys by stripping whitespace, colons, and non-alphanumeric characters (`replace(/[^a-zA-Z0-9]/g, '').toLowerCase()`), ensuring reliable field extraction regardless of markup formatting.
+- **Non-Existent Meter IDs:**
+  - Requesting an invalid meter (e.g. `GET /meters/INVALID_ID`) returns an HTTP 404 status with a SvelteKit error page (`<h1>404</h1> <p>Meter not found</p>`).
 
 ---
 
-## 3.3 Energy Telemetry Normalization & Monotonic Dial Semantics
-
-* **Envelope Structure:**
-  * `GET /portal/meters/:id/energy` returns `{ data: [ ...readings ] }` containing an array of reading objects.
-* **Cumulative Dial Register Semantics:**
-  * Empirical sampling across meters confirms that `kwh` values increase strictly monotonically over time:
-    $$48438.74 \longrightarrow 48439.16 \longrightarrow 48439.58 \longrightarrow \dots \longrightarrow 48580.36$$
-  * This proves that `kwh` is a cumulative mechanical dial register index rather than interval delta consumption.
-* **The Empty String Coercion Trap:**
-  * In JavaScript, `Number('') === 0` and `!isNaN('') === true`. Blindly casting upstream values during sensor dropouts causes empty strings to become fake zero readings.
-  * `normalizeNumber(val)` uses `Number.isFinite()` and explicitly returns `null` for empty strings, null, undefined, NaN, and `Infinity`.
-* **Timestamp Formatting & Timezone:**
-  * Upstream timestamps are formatted as `"DD/MM/YYYY HH:mm"` (e.g. `"30/06/2026 23:00"`, verified day-first by values $> 12$).
-  * Normalizes to ISO-8601 strings with explicit Indian Standard Time offset (`+05:30`): `"2026-06-30T23:00:00+05:30"`.
-  * The original string is preserved under `rawTimestamp` for complete data traceability.
-* **Tail Limiting (`?limit=N`):**
-  * The readings array is chronologically sorted oldest to newest.
-  * Passing `?limit=N` extracts the tail (`readings.slice(-limit)`), returning the latest $N$ readings in chronologically ascending order.
-  * Limit values are validated; non-positive numbers, floats, or non-integer values return HTTP 400 Bad Request.
+### D. Meter Location (Geo Coordinates) — Client-Side Deferred Loading
+- **Endpoint:** `GET /portal/meters/{meter_id}/geo`
+- **Response Format:**
+  ```json
+  {
+    "data": {
+      "latitude": "26.822136543835608",
+      "longitude": "75.90718190602279"
+    }
+  }
+  ```
+- **Quirk (Client-Side Deferred Loading):**
+  - GPS coordinates are omitted from the server-rendered HTML. The SSR page delivers a placeholder (`<div class="badge">Loading location...</div>`) and fires a secondary client-side fetch to `/portal/meters/{id}/geo` after mounting.
+  - The wrapper queries the HTML page and the `/geo` endpoint concurrently via `Promise.all`.
+  - Coordinates place the meters in the Jaipur metropolitan area in Rajasthan, India (Latitude `26.8°–27.0° N`, Longitude `75.7°–75.9° E`).
 
 ---
 
-## 3.4 Electrical Network Topology & Absence of `/portal/feeders`
-
-* **The Phantom Endpoint (`/portal/feeders`):**
-  * Direct HTTP requests to `/portal/feeders` return HTTP 404 Not Found.
-  * In the legacy SvelteKit architecture, Feeders are not an independent first-class entity endpoint.
-* **Topological Linkage:**
-  * Distribution Transformers (`GET /portal/dts?page=1`) provide `{ code, name, feederCode, capacityKva }`.
-  * Meters (`GET /portal/meters/search`) provide `{ meterId, serialNo, dtCode, ... }`.
-  * Meters have no direct `feederCode` attribute. The electrical distribution tree is reconstructed via a 3-tier topological join:
-    $$\text{Feeder } (\text{from DT } \texttt{feederCode}) \longrightarrow \text{Distribution Transformer } (\texttt{dtCode}) \longrightarrow \text{Meters}$$
-* **Dynamic DT Pagination:**
-  * `GET /portal/dts?page=1` returns `{ total: 40, page: 1, pageSize: 20, data: [...] }`.
-  * `totalPages = Math.ceil(total / pageSize)`. Dynamic multi-page traversal fetches all pages without hardcoding page numbers.
-* **Orphan Isolation & 100% Meter Retention:**
-  * In distribution grids, meters can be unassigned, decommissioned, or reference obsolete transformer codes.
-  * Dropping unlinked meters leads to revenue leakage and unmonitored endpoints.
-  * Any meter lacking a valid `dtCode` mapping is routed into an `UNASSIGNED` transformer bucket under an `UNASSIGNED` feeder branch, guaranteeing 100% meter retention ($N_{\text{in}} = N_{\text{out}}$).
-
----
-
-## 3.5 Fast Bulk Export Endpoint (`/portal/export` & `/portal/keys`) & TTL Caching
-
-* **Discovery via Client Bundle Inspection:**
-  * Reverse-engineering the SvelteKit frontend bundle chunk `_app/immutable/nodes/4.*.js` (Transformers view) revealed an internal "Export all meters" routine using HMAC-SHA256 request signing.
-* **Cryptographic Signing Protocol:**
-  * **Signing Secret:** Fetched from `GET /portal/keys` (`{ data: { signingSecret: "..." } }`).
-  * **Canonical Request String:** Formatted as a newline-delimited string:
-    $$\texttt{canonical} = [\texttt{method}, \texttt{path}, \texttt{query}, \texttt{timestamp}].\text{join}('\backslash\text{n}')$$
-    Example:
-    ```text
-    GET
-    /portal/export
-    page=1
-    1719788400
-    ```
-  * **Signature Generation:** Computed via `HMAC-SHA256(signingSecret, canonical)` formatted as a 64-character lowercase hexadecimal digest.
-  * **Required Request Headers:**
-    * `x-timestamp`: Unix epoch in seconds (`Math.floor(Date.now() / 1000)`).
-    * `x-signature`: Computed hexadecimal HMAC signature.
-* **Performance Impact & Schema Normalization:**
-  * While `GET /portal/meters/search` requires 21 sequential/parallel HTTP roundtrips (~2.5s) to paginate through 403 meters, `GET /portal/export?page=1` yields the entire 403-meter fleet in a single roundtrip (~150ms), reducing network overhead by >90%.
-  * The export payload includes backend internal fields (7-tier geographic hierarchy and coordinates); the client normalizes each item to the standard 6-field fleet schema (`meterId`, `serialNo`, `make`, `phaseType`, `installStatus`, `dtCode`).
-* **In-Memory TTL Cache & Single-Flight Mutex:**
-  * Meter and transformer catalogs are cached in-memory with a 5-minute TTL (`CACHE_TTL_MS = 300000`).
-  * An in-flight promise mutex (`metersInFlightPromise`) deduplicates concurrent cache-miss requests, eliminating "thundering herd" spikes against the legacy portal.
-  * Consumers can force cache invalidation via the `?fresh=true` query parameter or `clearCache()` API.
-* **Graceful Degradation & Automatic Fallback:**
-  * If `/portal/keys` or `/portal/export` fails (e.g. key rotation, upstream 500 error, or signature rejection), `fetchMetersWithFallback()` automatically catches the error and degrades gracefully to paginated search (`/portal/meters/search`), ensuring high availability.
+### E. Meter Energy Consumption Telemetry
+- **Endpoint:** `GET /portal/meters/{meter_id}/energy`
+- **Response Format:**
+  ```json
+  {
+    "data": [
+      {
+        "timestamp": "23/06/2026 23:30",
+        "kwh": "48438.74",
+        "kvah": "52313.84",
+        "voltR": "226"
+      },
+      {
+        "timestamp": "24/06/2026 00:00",
+        "kwh": "48439.16",
+        "kvah": "52314.29",
+        "voltR": "229"
+      }
+    ]
+  }
+  ```
+- **Quirks & Semantics:**
+  - **Strings as Numbers:** Numeric values (`kwh`, `kvah`, `voltR`) are sent as strings and must be parsed safely (converting empty strings to `null` to avoid JavaScript's `Number('') === 0` coercion).
+  - **Cumulative Dial Registers:** Chronological readings exhibit strictly monotonically increasing `kwh` values. This confirms the telemetry represents a cumulative meter dial register, not interval delta consumption.
+  - **Timezone:** Timestamps use `"DD/MM/YYYY HH:mm"`. Because the utility operates in Jaipur, Rajasthan, timestamps represent Indian Standard Time (IST, UTC+05:30). The wrapper converts these into ISO-8601 strings with an explicit `+05:30` offset.
+  - **Sampling Variation:** Some meters (e.g. `J100000`) contain 337 half-hourly readings (~7 days), while others contain 8 weekly or daily snapshots.
 
 ---
 
+### F. Fast Bulk Export Endpoint (`/portal/export` & `/portal/keys`)
+- **Discovery via Client Bundle Inspection:**
+  Inspecting the client-side Vite bundle chunk `_app/immutable/nodes/4.2Bgc2kUI.js` (the Transformers view) revealed an internal "Export all meters" function. The minified handler contained the HMAC signing logic:
+  ```javascript
+  // Literal snippet from _app/immutable/nodes/4.2Bgc2kUI.js:
+  async function C(e,t,n,r){let i=String(Math.floor(Date.now()/1e3)),a=[e,t,n,i].join(`\n`),o=await crypto.subtle.importKey(`raw`,new TextEncoder().encode(r),{name:`HMAC`,hash:`SHA-256`},!1,[`sign`]),s=await crypto.subtle.sign(`HMAC`,o,new TextEncoder().encode(a));return{timestamp:i,signature:[...new Uint8Array(s)].map(e=>e.toString(16).padStart(2,`0`)).join(``)}}
+  ```
+  Parameter mapping:
+  - `e`: HTTP method (`"GET"`)
+  - `t`: Request path (`"/portal/export"`)
+  - `n`: Query string (`"page=1"`)
+  - `r`: Signing secret fetched from `GET /portal/keys`
+  - `i`: Integer UNIX timestamp in seconds
+  - `a`: Newline-delimited canonical string (`"GET\n/portal/export\npage=1\n{timestamp}"`)
+  - `s`: HMAC-SHA256 signature formatted as a 64-character lowercase hexadecimal string
+- **Signing Key Route:**
+  `GET /portal/keys` returns:
+  ```json
+  {
+    "data": {
+      "signingSecret": "<REDACTED_PORTAL_SIGNING_SECRET>"
+    }
+  }
+  ```
+- **Bulk Payload Returned:**
+  Calling `GET /portal/export?page=1` with valid `x-timestamp` and `x-signature` headers returns all 403 meters in a single ~150 ms response. The raw export payload contains the backend's internal 7-tier hierarchy (`zone -> circle -> division -> subdivision -> substation -> feeder -> dt`) and coordinates.
+- **Schema Normalization:**
+  The wrapper normalizes the bulk export catalog to match the 6 standard fields of the search endpoint (`meterId`, `serialNo`, `make`, `phaseType`, `installStatus`, `dtCode`), while reconstructing the electrical hierarchy through `/portal/dts`. This guarantees that `/api/v1/meters` returns an identical, predictable schema whether served from fast bulk export or sequential pagination fallback.
 
+---
 
+## 3. Data Anomalies & Quirks Summary
+
+1. **`DT-007` Spatial Scatter Anomaly:**
+   - 13 meters are assigned to `DT-007` (a 63 kVA transformer located in Sanganer, Jaipur).
+   - Geographic coordinates of meters on `DT-007` span from Latitude `26.8027` in the south (meter `J100286`) to `27.0256` in the north (meter `J100326`), with `J100400` at `26.8827` — a **spread of more than 25 kilometers across Jaipur**.
+   - In low-voltage distribution grids, secondary lines from a 63 kVA transformer typically extend no more than a few hundred meters. A 25 km spread is a severe GIS mapping error in the legacy dataset.
+2. **Ampersands in Serials:**
+   - 77 meters (manufactured by L&T) have serial numbers prefixed with `L&` (e.g. `L&84997`). Direct HTTP queries without URL encoding will fail or truncate.
+3. **Strings for Numbers:**
+   - Telemetry readings transmit numeric data as strings (`"48438.74"`).
+4. **Missing Direct Feeder Codes on Meters:**
+   - Meters only contain `dtCode`. Feeder associations must be reconstructed through Distribution Transformers.
+
+---
+
+## 4. Upstream Endpoint Mapping Table
+
+| Wrapper Endpoint | Upstream Target(s) | Mechanism & Purpose |
+|---|---|---|
+| `GET /health` | *None* | Service health, uptime, and timestamp |
+| `GET /api/v1/meters` | `GET /portal/export?page=1` (fallback: `GET /portal/meters/search`) | Fast HMAC bulk export with automatic pagination fallback; in-memory 5-minute TTL cache |
+| `GET /api/v1/meters/:id` | `GET /meters/:id` (HTML) + `GET /portal/meters/:id/geo` (JSON) | Concurrent `Promise.all` fetch; Cheerio whitespace-tolerant HTML scraping + coordinate normalization |
+| `GET /api/v1/meters/:id/energy` | `GET /portal/meters/:id/energy` | Safe numeric casting; ISO-8601 normalization with IST (+05:30) offset; supports `?limit=N` tail slice |
+| `GET /api/v1/network/hierarchy` | `GET /portal/dts` + `GET /portal/meters/search` | Dynamic DT pagination; meters mapped to DTs via `dtCode`, and DTs mapped to feeders via `feederCode` |

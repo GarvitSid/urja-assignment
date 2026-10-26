@@ -22,12 +22,14 @@ describe('Service Foundation - Health Check & 404 Routing', () => {
     });
   });
 
-  it('GET /health returns 200 with status ok and ISO timestamp', async () => {
+  it('GET /health returns 200 with status ok, service, uptime, and ISO timestamp', async () => {
     const res = await fetch(`${baseUrl}/health`);
     assert.equal(res.status, 200);
 
     const body = await res.json();
     assert.equal(body.status, 'ok');
+    assert.equal(body.service, 'urja-assignment');
+    assert.equal(typeof body.uptime, 'number');
     assert.ok(body.timestamp, 'timestamp should be present');
     assert.ok(!isNaN(Date.parse(body.timestamp)), 'timestamp should be a valid ISO date');
   });
